@@ -12,8 +12,8 @@ TypeScript SDK for [angler-auth](https://auth.angler.network), Angler's self-hos
 npm install @angler/auth
 ```
 
-Until the first npm release, install from GitHub: `npm install github:Angler-Network/angler-auth-js` and run
-`npm run build` in `node_modules/@angler/auth`, or clone this repository and build it.
+Until the first npm release, install from GitHub: `npm install github:Angler-Network/angler-auth-js#<commit>`.
+npm builds `dist/` on install (`prepare`).
 
 Every call that fails throws an `AuthError`: `status` (HTTP status, or `0` when there was no answer),
 `code` (the service's `{ "error": code }`, or one of the SDK's own), `retryAfter` (seconds, on `429`) and
