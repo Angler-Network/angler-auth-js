@@ -14,12 +14,23 @@ import {
 } from "./webauthn.ts";
 import { buildSiweMessage, pageIdentity } from "./siwe.ts";
 import { buildSiwsMessage, DEFAULT_SIWS_STATEMENT } from "./solana.ts";
+import { buildStarknetTypedData, DEFAULT_STARKNET_CHAIN, DEFAULT_STARKNET_STATEMENT, normalizeStarknetAddress, type StarknetTypedData } from "./starknet.ts";
+import { buildSuiMessage, DEFAULT_SUI_CHAIN, DEFAULT_SUI_STATEMENT, normalizeSuiAddress } from "./sui.ts";
 
 export { AuthError, isAuthError } from "../errors.ts";
 export type { AuthErrorCode, AuthErrorInit } from "../errors.ts";
 export type { AccountInfo, AuthClaims, AuthMethod, Language, OAuthProvider, SignInMethod, SignInMethodKind, WalletInfo } from "../types.ts";
 export { buildSiweMessage, DEFAULT_SIWE_STATEMENT, type SiweMessageInput } from "./siwe.ts";
 export { buildSiwsMessage, DEFAULT_SIWS_STATEMENT, type SiwsMessageInput } from "./solana.ts";
+export { buildSuiMessage, DEFAULT_SUI_CHAIN, DEFAULT_SUI_STATEMENT, normalizeSuiAddress, type SuiMessageInput } from "./sui.ts";
+export {
+  buildStarknetTypedData,
+  DEFAULT_STARKNET_CHAIN,
+  DEFAULT_STARKNET_STATEMENT,
+  normalizeStarknetAddress,
+  type StarknetMessageInput,
+  type StarknetTypedData,
+} from "./starknet.ts";
 
 // --- types ------------------------------------------------------------------------------
 
@@ -133,6 +144,45 @@ export type SolanaSigner = {
   | { address?: string; signIn: (input: SolanaSignInInput) => Promise<SolanaSignInOutput> }
 );
 
+/**
+ * A Sui wallet. The SDK builds the message and the wallet signs its bytes as a personal message
+ * (`sui:signPersonalMessage`), giving back the serialized signature: base64 of `flag || signature || public key`.
+ * Wallets that sign with zkLogin, a multisig or a passkey give signatures the service refuses (`unsupported_signature`).
+ */
+export interface SuiSigner {
+  /** The connected account. Shortened or upper-case forms are normalised. */
+  address: string;
+  /** Defaults to `sui:mainnet`. Must be one of the service's `SUI_CHAIN_IDS`. */
+  chainId?: string;
+  /** Defaults to the page's `location.host` and `location.origin`; both must be allowed by the service. */
+  domain?: string;
+  uri?: string;
+  statement?: string;
+  /** Seconds the message stays valid. Default: the service's own limit (10 minutes). */
+  expiresInSeconds?: number;
+  /** `signPersonalMessage` of the wallet: `signature` as the wallet returns it. */
+  signPersonalMessage: (message: Uint8Array) => Promise<string | { signature: string }>;
+}
+
+/**
+ * A Starknet account. The SDK builds the SNIP-12 typed message and the wallet signs it (`wallet_signTypedData`), giving
+ * back the signature felts. The service has an account contract check them, so the account must be deployed.
+ */
+export interface StarknetSigner {
+  /** The connected account. Shortened or upper-case forms are normalised. */
+  address: string;
+  /** Defaults to `SN_MAIN`. Must be a chain the service has a node for (`STARKNET_RPC_URLS`). */
+  chainId?: string;
+  /** Defaults to the page's `location.host` and `location.origin`; both must be allowed by the service. */
+  domain?: string;
+  uri?: string;
+  statement?: string;
+  /** Seconds the message stays valid, at most 3600. Default 600. */
+  expiresInSeconds?: number;
+  /** `wallet_signTypedData` of the wallet: the felts of the signature. */
+  signTypedData: (typedData: StarknetTypedData) => Promise<string[]>;
+}
+
 /** The Login Widget's `onauth` object, exactly as Telegram gave it: every field is signed, so none may be edited or left out. */
 export interface TelegramWidgetData {
   id: number | string;
@@ -228,6 +278,33 @@ export interface AuthClient {
    * the call throws `confirmation_required`.
    */
   linkSolana(signer: SolanaSigner, options?: ConfirmationCallback): Promise<{ status: "linked"; identity: string }>;
+
+  // Sui wallets
+  /** Whether the service has Sui sign-in on (`SUI_ENABLED`); otherwise its routes answer `not_found`. */
+  suiEnabled(): Promise<boolean>;
+  /** One-time nonce for a Sign-In With Sui message. */
+  suiNonce(): Promise<{ nonce: string }>;
+  /** Has the wallet sign a message and verifies it. Creates the account (no email) when the wallet is new. */
+  signInWithSui(signer: SuiSigner): Promise<SignInResult>;
+  /**
+   * Attaches the wallet to the signed-in account. Needs a recent sign-in. An account with a verified email gets a code
+   * mailed first: `getConfirmationCode` asks for it (the wallet is not asked to sign again), and without it the call
+   * throws `confirmation_required`.
+   */
+  linkSui(signer: SuiSigner, options?: ConfirmationCallback): Promise<{ status: "linked"; identity: string }>;
+
+  // Starknet accounts
+  /** Whether the service has Starknet sign-in on (`STARKNET_RPC_URLS`); otherwise its routes answer `not_found`. */
+  starknetEnabled(): Promise<boolean>;
+  /** One-time nonce for a Sign-In With Starknet message. */
+  starknetNonce(): Promise<{ nonce: string }>;
+  /**
+   * Has the wallet sign a typed message and verifies it with the account contract. Creates the account (no email) when the
+   * account is new. Throws `wallet_check_unavailable` (503) when the service's node did not answer: the same call may be tried again.
+   */
+  signInWithStarknet(signer: StarknetSigner): Promise<SignInResult>;
+  /** Attaches the account to the signed-in account; the emailed code works as for `linkSui`. */
+  linkStarknet(signer: StarknetSigner, options?: ConfirmationCallback): Promise<{ status: "linked"; identity: string }>;
 
   // Telegram
   /** Whether the service has Telegram sign-in on (`TELEGRAM_BOT_TOKEN`); otherwise its routes answer `not_found`. */
@@ -465,6 +542,53 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     return changesSession(() => verifyLinkable<T>("/solana/verify", { message, signature: base64urlEncode(signature) }, link, callback));
   }
 
+  // --- Sui ---
+  async function sui<T>(signer: SuiSigner, link: boolean, callback: ConfirmationCallback = {}): Promise<T> {
+    const domain = signer.domain ?? pageIdentity().domain;
+    const uri = signer.uri ?? pageIdentity().uri;
+    const address = normalizeSuiAddress(signer.address);
+    const { nonce } = await post<{ nonce: string }>("/sui/nonce");
+    const issued = new Date(now());
+    const message = buildSuiMessage({
+      domain,
+      uri,
+      address,
+      chainId: signer.chainId ?? DEFAULT_SUI_CHAIN,
+      nonce,
+      issuedAt: issued.toISOString(),
+      statement: signer.statement ?? DEFAULT_SUI_STATEMENT,
+      ...(signer.expiresInSeconds ? { expirationTime: new Date(issued.getTime() + signer.expiresInSeconds * 1000).toISOString() } : {}),
+    });
+    const signed = await signer.signPersonalMessage(new TextEncoder().encode(message));
+    const signature = typeof signed === "string" ? signed : signed?.signature;
+    if (typeof signature !== "string" || signature === "") throw new AuthError({ status: 0, code: "invalid_signature" });
+    return changesSession(() => verifyLinkable<T>("/sui/verify", { message, signature }, link, callback));
+  }
+
+  // --- Starknet ---
+  async function starknet<T>(signer: StarknetSigner, link: boolean, callback: ConfirmationCallback = {}): Promise<T> {
+    const host = signer.domain ?? pageIdentity().domain;
+    const uri = signer.uri ?? pageIdentity().uri;
+    const address = normalizeStarknetAddress(signer.address);
+    const { nonce } = await post<{ nonce: string }>("/starknet/nonce");
+    const issuedAt = Math.floor(now() / 1000);
+    const typedData = buildStarknetTypedData({
+      address,
+      chainId: signer.chainId ?? DEFAULT_STARKNET_CHAIN,
+      host,
+      uri,
+      statement: signer.statement ?? DEFAULT_STARKNET_STATEMENT,
+      nonce,
+      issuedAt,
+      expirationTime: issuedAt + (signer.expiresInSeconds ?? 600),
+    });
+    const signature = await signer.signTypedData(typedData);
+    if (!Array.isArray(signature) || signature.length === 0 || signature.some((felt) => typeof felt !== "string")) {
+      throw new AuthError({ status: 0, code: "invalid_signature" });
+    }
+    return changesSession(() => verifyLinkable<T>("/starknet/verify", { typedData, signature }, link, callback));
+  }
+
   async function telegram<T>(login: TelegramLogin, link: boolean, callback: ConfirmationCallback = {}): Promise<T> {
     return changesSession(() => verifyLinkable<T>("/telegram/verify", { ...login }, link, callback));
   }
@@ -515,6 +639,16 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     solanaNonce: () => post("/solana/nonce"),
     signInWithSolana: (signer) => solana<SignInResult>(signer, false),
     linkSolana: (signer, opts) => solana<{ status: "linked"; identity: string }>(signer, true, opts),
+
+    suiEnabled: async () => (await call<{ sui?: boolean }>("GET", "/providers")).sui === true,
+    suiNonce: () => post("/sui/nonce"),
+    signInWithSui: (signer) => sui<SignInResult>(signer, false),
+    linkSui: (signer, opts) => sui<{ status: "linked"; identity: string }>(signer, true, opts),
+
+    starknetEnabled: async () => (await call<{ starknet?: boolean }>("GET", "/providers")).starknet === true,
+    starknetNonce: () => post("/starknet/nonce"),
+    signInWithStarknet: (signer) => starknet<SignInResult>(signer, false),
+    linkStarknet: (signer, opts) => starknet<{ status: "linked"; identity: string }>(signer, true, opts),
 
     telegramEnabled: async () => (await call<{ telegram?: boolean }>("GET", "/providers")).telegram === true,
     signInWithTelegram: (login) => telegram<SignInResult>(login, false),
