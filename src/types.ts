@@ -68,3 +68,22 @@ export interface AccountInfo {
   identities: { identity: string }[];
   passkeys: { id: string; name: string | null; createdAt: string; lastUsedAt: string | null }[];
 }
+
+export type SignInMethodKind = "email" | "password" | "oauth" | "wallet" | "solana" | "telegram" | "passkey";
+
+/** One way into the account, from `listIdentities`. `id` is what `unlinkIdentity` takes. */
+export interface SignInMethod {
+  id: string;
+  kind: SignInMethodKind;
+  /** The provider, for `oauth`. */
+  provider?: OAuthProvider;
+  /** What to show: the address, the wallet address, a Telegram user, a passkey's name. */
+  label: string;
+  createdAt: string | null;
+  /** Whether it can sign in right now, under the service's policy and settings. */
+  canSignIn: boolean;
+  /** Whether `unlinkIdentity` would remove it now: not the address, not a wallet's owner passkey, not the last way in. */
+  removable: boolean;
+  /** Why it can never be removed, when that is the reason. */
+  locked?: "email" | "wallet_owner_passkey";
+}

@@ -1,7 +1,7 @@
 import { base64urlEncode, decodeJwtPart } from "../base64url.ts";
 import { AuthError } from "../errors.ts";
 import { joinUrl, requestJson } from "../http.ts";
-import type { AccountInfo, AuthMethod, Language, OAuthProvider } from "../types.ts";
+import type { AccountInfo, AuthMethod, Language, OAuthProvider, SignInMethod } from "../types.ts";
 import {
   assertionJson,
   creationOptions,
@@ -17,7 +17,7 @@ import { buildSiwsMessage, DEFAULT_SIWS_STATEMENT } from "./solana.ts";
 
 export { AuthError, isAuthError } from "../errors.ts";
 export type { AuthErrorCode, AuthErrorInit } from "../errors.ts";
-export type { AccountInfo, AuthClaims, AuthMethod, Language, OAuthProvider, WalletInfo } from "../types.ts";
+export type { AccountInfo, AuthClaims, AuthMethod, Language, OAuthProvider, SignInMethod, SignInMethodKind, WalletInfo } from "../types.ts";
 export { buildSiweMessage, DEFAULT_SIWE_STATEMENT, type SiweMessageInput } from "./siwe.ts";
 export { buildSiwsMessage, DEFAULT_SIWS_STATEMENT, type SiwsMessageInput } from "./solana.ts";
 
@@ -149,6 +149,15 @@ export interface ConfirmationCallback {
   getConfirmationCode?: () => string | Promise<string>;
 }
 
+/** What a removal answers. `signedOut` is true when the session that asked signed in with the removed kind and ended too. */
+export interface UnlinkResult {
+  status: "unlinked";
+  ids: string[];
+  /** Sessions of the account that ended, this one included. */
+  sessionsEnded: number;
+  signedOut: boolean;
+}
+
 export interface AuthClient {
   // password
   /** Always answers `verification_sent`; finish with `verifyEmail`. */
@@ -178,7 +187,23 @@ export interface AuthClient {
    * `getConfirmationCode` asks for it, and without it the call throws `confirmation_required`.
    */
   linkOAuth(provider: OAuthProvider, options?: { redirect?: string } & ConfirmationCallback): Promise<{ url: string }>;
-  unlinkOAuth(provider: OAuthProvider): Promise<{ status: "unlinked" }>;
+  /**
+   * Removes every account of the provider, by the rules of `unlinkIdentity` (a recent sign-in, the emailed code, never the
+   * last way in).
+   */
+  unlinkOAuth(provider: OAuthProvider, options?: ConfirmationCallback): Promise<UnlinkResult>;
+
+  // sign-in methods
+  /** The account's ways to sign in, and which of them can be removed now. `confirmation` says whether removing needs the emailed code. */
+  listIdentities(): Promise<{ methods: SignInMethod[]; confirmation: "email" | "none" }>;
+  /**
+   * Removes one method (`id` from `listIdentities`). Needs a recent sign-in. An account with a verified email gets a code
+   * mailed first: `getConfirmationCode` asks for it, and without it the call throws `confirmation_required`. Fails with
+   * `last_sign_in_method` when nothing else could sign in, `email_not_removable` and `wallet_owner_passkey` for the two
+   * that are fixed, and `not_found` for an id the account doesn't have. Every session that signed in with the same kind
+   * of method ends, this one too when it is one of them: check `signedOut`.
+   */
+  unlinkIdentity(id: string, options?: ConfirmationCallback): Promise<UnlinkResult>;
 
   // wallets
   /** One-time nonce for an EIP-4361 message. */
@@ -444,6 +469,17 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     return changesSession(() => verifyLinkable<T>("/telegram/verify", { ...login }, link, callback));
   }
 
+  /** A removal: the service mails a code on the first call and takes the same body with `code` on the second. */
+  async function unlink(path: string, body: Record<string, unknown>, callback: ConfirmationCallback): Promise<UnlinkResult> {
+    return changesSession(async () => {
+      const answer = await post<UnlinkResult>(path, body);
+      if (!wantsEmailCode(answer)) return answer;
+      const again = await post<UnlinkResult>(path, { ...body, code: await emailedCode(callback) });
+      if (wantsEmailCode(again)) throw new AuthError({ status: 200, code: "confirmation_required" });
+      return again;
+    });
+  }
+
   const oauthQuery = (redirect?: string) => (redirect ? `?redirect=${encodeURIComponent(redirect)}` : "");
 
   return {
@@ -468,7 +504,9 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
       if (wantsEmailCode(again)) throw new AuthError({ status: 200, code: "confirmation_required" });
       return again;
     },
-    unlinkOAuth: (provider) => post(`/oauth/${provider}/unlink`),
+    unlinkOAuth: (provider, opts = {}) => unlink(`/oauth/${provider}/unlink`, {}, opts),
+    listIdentities: () => call("GET", "/identities"),
+    unlinkIdentity: (id, opts = {}) => unlink("/identities/unlink", { id }, opts),
 
     siweNonce: () => post("/wallet/nonce"),
     signInWithEthereum: (signer) => ethereum<SignInResult>(signer, false),
