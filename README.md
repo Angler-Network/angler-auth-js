@@ -1,6 +1,6 @@
 # @angler/auth
 
-TypeScript SDK for [angler-auth](../README.md). No runtime dependencies. ESM only.
+TypeScript SDK for [angler-auth](https://auth.angler.network), Angler's self-hosted sign-in service. No runtime dependencies. ESM only.
 
 | Import | Runs in | What it is |
 |---|---|---|
@@ -8,8 +8,12 @@ TypeScript SDK for [angler-auth](../README.md). No runtime dependencies. ESM onl
 | `@angler/auth/server` | Node 22+, Deno, Workers (see below) | `verifyToken`, `getSessionToken`, admin client |
 | `@angler/auth/next` | Next.js App Router (server and middleware) | Cookie → token → claims helpers |
 
-It is not published to a registry. Build it with `npm ci && npm run build` in this folder and install the
-folder (`npm install ../path/to/angler-auth/sdk`), or add it to a workspace.
+```bash
+npm install @angler/auth
+```
+
+Until the first npm release, install from GitHub: `npm install github:Angler-Network/angler-auth-js` and run
+`npm run build` in `node_modules/@angler/auth`, or clone this repository and build it.
 
 Every call that fails throws an `AuthError`: `status` (HTTP status, or `0` when there was no answer),
 `code` (the service's `{ "error": code }`, or one of the SDK's own), `retryAfter` (seconds, on `429`) and
