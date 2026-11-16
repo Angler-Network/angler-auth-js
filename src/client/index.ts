@@ -123,8 +123,11 @@ export interface AuthClient {
   /** The URL to navigate to (`location.assign`). OAuth is a redirect flow, not a fetch. */
   oauthUrl(provider: OAuthProvider, options?: { redirect?: string }): string;
   providers(): Promise<OAuthProvider[]>;
-  /** `{ url }` to navigate to. Needs a recent sign-in. */
-  linkOAuth(provider: OAuthProvider, options?: { redirect?: string }): Promise<{ url: string }>;
+  /**
+   * `{ url }` to navigate to. Needs a recent sign-in. An account with a verified email gets a code mailed first:
+   * `getConfirmationCode` asks for it, and without it the call throws `confirmation_required`.
+   */
+  linkOAuth(provider: OAuthProvider, options?: { redirect?: string } & ConfirmationCallback): Promise<{ url: string }>;
   unlinkOAuth(provider: OAuthProvider): Promise<{ status: "unlinked" }>;
 
   // wallets
@@ -132,8 +135,12 @@ export interface AuthClient {
   siweNonce(): Promise<{ nonce: string }>;
   /** Builds the message, has the caller sign it and verifies it. Creates the account when the wallet is new. */
   signInWithEthereum(signer: EthereumSigner): Promise<SignInResult>;
-  /** Attaches the wallet to the signed-in account. Needs a recent sign-in. */
-  linkEthereum(signer: EthereumSigner): Promise<{ status: "linked"; address: string }>;
+  /**
+   * Attaches the wallet to the signed-in account. Needs a recent sign-in. An account with a verified email gets a
+   * code mailed first: `getConfirmationCode` asks for it (the wallet is not asked to sign again), and without it
+   * the call throws `confirmation_required`.
+   */
+  linkEthereum(signer: EthereumSigner, options?: ConfirmationCallback): Promise<{ status: "linked"; address: string }>;
 
   // passkeys
   registerPasskey(options?: { name?: string; lang?: Language } & ConfirmationCallback): Promise<PasskeyRegistered>;
@@ -267,6 +274,17 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     return callback.getConfirmationCode();
   }
 
+  /** The service mailed a code and waits for it to come back as `code`. */
+  const wantsEmailCode = (answer: unknown): boolean =>
+    typeof answer === "object" && answer !== null && (answer as { confirmation?: unknown }).confirmation === "email";
+
+  /** The emailed code as a string (the service ignores any other type), or `confirmation_required`. */
+  async function emailedCode(callback: ConfirmationCallback): Promise<string> {
+    const code = await confirmationCode(true, callback);
+    if (typeof code !== "string" || code === "") throw new AuthError({ status: 0, code: "confirmation_required" });
+    return code;
+  }
+
   async function getAssertion(optionsPath: string, extra: { mediation?: CredentialMediationRequirement; signal?: AbortSignal } = {}) {
     const json = await post<RequestOptionsJson>(optionsPath);
     const container = credentialsContainer(options.credentials);
@@ -281,7 +299,7 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
   }
 
   // --- SIWE ---
-  async function ethereum<T>(signer: EthereumSigner, link: boolean): Promise<T> {
+  async function ethereum<T>(signer: EthereumSigner, link: boolean, callback: ConfirmationCallback = {}): Promise<T> {
     const domain = signer.domain ?? pageIdentity().domain;
     const uri = signer.uri ?? pageIdentity().uri;
     const { nonce } = await post<{ nonce: string }>("/wallet/nonce");
@@ -297,7 +315,15 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
       ...(signer.expiresInSeconds ? { expirationTime: new Date(issued.getTime() + signer.expiresInSeconds * 1000).toISOString() } : {}),
     });
     const signature = await signer.signMessage(message);
-    return changesSession(() => post<T>("/wallet/verify", { message, signature, ...(link ? { link: true } : {}) }));
+    return changesSession(async () => {
+      const body = { message, signature, ...(link ? { link: true } : {}) };
+      const answer = await post<T>("/wallet/verify", body);
+      if (!link || !wantsEmailCode(answer)) return answer;
+      // The service stopped before it used the nonce: the same message and signature go back with the code.
+      const again = await post<T>("/wallet/verify", { ...body, code: await emailedCode(callback) });
+      if (wantsEmailCode(again)) throw new AuthError({ status: 200, code: "confirmation_required" });
+      return again;
+    });
   }
 
   const oauthQuery = (redirect?: string) => (redirect ? `?redirect=${encodeURIComponent(redirect)}` : "");
@@ -316,12 +342,19 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
 
     oauthUrl: (provider, opts) => `${baseUrl}/oauth/${provider}${oauthQuery(opts?.redirect)}`,
     providers: async () => (await call<{ oauth: OAuthProvider[] }>("GET", "/providers")).oauth,
-    linkOAuth: (provider, opts) => post(`/oauth/${provider}/link`, opts?.redirect ? { redirect: opts.redirect } : {}),
+    async linkOAuth(provider, opts = {}) {
+      const body = opts.redirect ? { redirect: opts.redirect } : {};
+      const answer = await post<{ url: string }>(`/oauth/${provider}/link`, body);
+      if (!wantsEmailCode(answer)) return answer;
+      const again = await post<{ url: string }>(`/oauth/${provider}/link`, { ...body, code: await emailedCode(opts) });
+      if (wantsEmailCode(again)) throw new AuthError({ status: 200, code: "confirmation_required" });
+      return again;
+    },
     unlinkOAuth: (provider) => post(`/oauth/${provider}/unlink`),
 
     siweNonce: () => post("/wallet/nonce"),
     signInWithEthereum: (signer) => ethereum<SignInResult>(signer, false),
-    linkEthereum: (signer) => ethereum<{ status: "linked"; address: string }>(signer, true),
+    linkEthereum: (signer, opts) => ethereum<{ status: "linked"; address: string }>(signer, true, opts),
 
     async registerPasskey(opts = {}) {
       const json = await post<RegistrationOptionsJson>("/passkey/register/options", opts.lang ? { lang: opts.lang } : {});
