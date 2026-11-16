@@ -1,4 +1,4 @@
-import { decodeJwtPart } from "../base64url.ts";
+import { base64urlEncode, decodeJwtPart } from "../base64url.ts";
 import { AuthError } from "../errors.ts";
 import { joinUrl, requestJson } from "../http.ts";
 import type { AccountInfo, AuthMethod, Language, OAuthProvider } from "../types.ts";
@@ -13,11 +13,13 @@ import {
   type RequestOptionsJson,
 } from "./webauthn.ts";
 import { buildSiweMessage, pageIdentity } from "./siwe.ts";
+import { buildSiwsMessage, DEFAULT_SIWS_STATEMENT } from "./solana.ts";
 
 export { AuthError, isAuthError } from "../errors.ts";
 export type { AuthErrorCode, AuthErrorInit } from "../errors.ts";
 export type { AccountInfo, AuthClaims, AuthMethod, Language, OAuthProvider, WalletInfo } from "../types.ts";
 export { buildSiweMessage, DEFAULT_SIWE_STATEMENT, type SiweMessageInput } from "./siwe.ts";
+export { buildSiwsMessage, DEFAULT_SIWS_STATEMENT, type SiwsMessageInput } from "./solana.ts";
 
 // --- types ------------------------------------------------------------------------------
 
@@ -94,6 +96,54 @@ export interface EthereumSigner {
   expiresInSeconds?: number;
 }
 
+/** What Wallet Standard's `solana:signIn` takes. */
+export interface SolanaSignInInput {
+  domain: string;
+  address?: string;
+  statement: string;
+  uri: string;
+  version: "1";
+  chainId: string;
+  nonce: string;
+  issuedAt: string;
+  expirationTime?: string;
+}
+
+/** What Wallet Standard's `solana:signIn` gives back. */
+export interface SolanaSignInOutput {
+  signedMessage: Uint8Array;
+  signature: Uint8Array;
+}
+
+/**
+ * A Solana wallet. Give `signIn` (Wallet Standard, Phantom: the wallet builds and signs the message) or `address` and
+ * `signMessage` (wallet-adapter: the SDK builds the message and the wallet signs its bytes, giving the 64-byte signature).
+ */
+export type SolanaSigner = {
+  /** Defaults to `mainnet`. Must be one of the service's `SOLANA_CHAIN_IDS`. */
+  chainId?: string;
+  /** Defaults to the page's `location.host` and `location.origin`; both must be allowed by the service. */
+  domain?: string;
+  uri?: string;
+  statement?: string;
+  /** Seconds the message stays valid. Default: the service's own limit (10 minutes). */
+  expiresInSeconds?: number;
+} & (
+  | { address: string; signMessage: (message: Uint8Array) => Promise<Uint8Array> }
+  | { address?: string; signIn: (input: SolanaSignInInput) => Promise<SolanaSignInOutput> }
+);
+
+/** The Login Widget's `onauth` object, exactly as Telegram gave it: every field is signed, so none may be edited or left out. */
+export interface TelegramWidgetData {
+  id: number | string;
+  auth_date: number | string;
+  hash: string;
+  [field: string]: string | number | undefined;
+}
+
+/** The Login Widget's data, or a Mini App's `Telegram.WebApp.initData` string. */
+export type TelegramLogin = { widget: TelegramWidgetData } | { initData: string };
+
 export interface ConfirmationCallback {
   /** Asked for the emailed code when the service says one was sent. Without it the call throws `confirmation_required`. */
   getConfirmationCode?: () => string | Promise<string>;
@@ -141,6 +191,26 @@ export interface AuthClient {
    * the call throws `confirmation_required`.
    */
   linkEthereum(signer: EthereumSigner, options?: ConfirmationCallback): Promise<{ status: "linked"; address: string }>;
+
+  // Solana wallets
+  /** One-time nonce for a Sign-In With Solana message. */
+  solanaNonce(): Promise<{ nonce: string }>;
+  /** Has the wallet sign a message and verifies it. Creates the account (no email) when the wallet is new. */
+  signInWithSolana(signer: SolanaSigner): Promise<SignInResult>;
+  /**
+   * Attaches the wallet to the signed-in account. Needs a recent sign-in. An account with a verified email gets a
+   * code mailed first: `getConfirmationCode` asks for it (the wallet is not asked to sign again), and without it
+   * the call throws `confirmation_required`.
+   */
+  linkSolana(signer: SolanaSigner, options?: ConfirmationCallback): Promise<{ status: "linked"; identity: string }>;
+
+  // Telegram
+  /** Whether the service has Telegram sign-in on (`TELEGRAM_BOT_TOKEN`); otherwise its routes answer `not_found`. */
+  telegramEnabled(): Promise<boolean>;
+  /** Creates the account (no email) when the Telegram user is new. A payload works once. */
+  signInWithTelegram(login: TelegramLogin): Promise<SignInResult>;
+  /** Attaches the Telegram account to the signed-in account; the emailed code works as for `linkSolana`. */
+  linkTelegram(login: TelegramLogin, options?: ConfirmationCallback): Promise<{ status: "linked"; identity: string }>;
 
   // passkeys
   registerPasskey(options?: { name?: string; lang?: Language } & ConfirmationCallback): Promise<PasskeyRegistered>;
@@ -315,15 +385,63 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
       ...(signer.expiresInSeconds ? { expirationTime: new Date(issued.getTime() + signer.expiresInSeconds * 1000).toISOString() } : {}),
     });
     const signature = await signer.signMessage(message);
-    return changesSession(async () => {
-      const body = { message, signature, ...(link ? { link: true } : {}) };
-      const answer = await post<T>("/wallet/verify", body);
-      if (!link || !wantsEmailCode(answer)) return answer;
-      // The service stopped before it used the nonce: the same message and signature go back with the code.
-      const again = await post<T>("/wallet/verify", { ...body, code: await emailedCode(callback) });
-      if (wantsEmailCode(again)) throw new AuthError({ status: 200, code: "confirmation_required" });
-      return again;
-    });
+    return changesSession(() => verifyLinkable<T>("/wallet/verify", { message, signature }, link, callback));
+  }
+
+  /**
+   * A call that signs in, or links with `link`. The service may stop before it uses anything single-use and ask for the
+   * emailed code: the same body goes back with it, so the wallet or Telegram does not sign twice.
+   */
+  async function verifyLinkable<T>(path: string, payload: Record<string, unknown>, link: boolean, callback: ConfirmationCallback): Promise<T> {
+    const body = { ...payload, ...(link ? { link: true } : {}) };
+    const answer = await post<T>(path, body);
+    if (!link || !wantsEmailCode(answer)) return answer;
+    const again = await post<T>(path, { ...body, code: await emailedCode(callback) });
+    if (wantsEmailCode(again)) throw new AuthError({ status: 200, code: "confirmation_required" });
+    return again;
+  }
+
+  // --- SIWS ---
+  async function solana<T>(signer: SolanaSigner, link: boolean, callback: ConfirmationCallback = {}): Promise<T> {
+    const domain = signer.domain ?? pageIdentity().domain;
+    const uri = signer.uri ?? pageIdentity().uri;
+    const chainId = signer.chainId ?? "mainnet";
+    const statement = signer.statement ?? DEFAULT_SIWS_STATEMENT;
+    const { nonce } = await post<{ nonce: string }>("/solana/nonce");
+    const issued = new Date(now());
+    const issuedAt = issued.toISOString();
+    const expirationTime = signer.expiresInSeconds ? new Date(issued.getTime() + signer.expiresInSeconds * 1000).toISOString() : undefined;
+
+    let message: string;
+    let signature: Uint8Array;
+    if ("signIn" in signer) {
+      const output = await signer.signIn({
+        domain,
+        ...(signer.address ? { address: signer.address } : {}),
+        statement,
+        uri,
+        version: "1",
+        chainId,
+        nonce,
+        issuedAt,
+        ...(expirationTime ? { expirationTime } : {}),
+      });
+      // The wallet may word the message its own way: what it signed is what the service reads.
+      try {
+        message = new TextDecoder("utf-8", { fatal: true }).decode(output.signedMessage);
+      } catch {
+        throw new AuthError({ status: 0, code: "invalid_message" });
+      }
+      signature = output.signature;
+    } else {
+      message = buildSiwsMessage({ domain, uri, address: signer.address, chainId, nonce, issuedAt, statement, ...(expirationTime ? { expirationTime } : {}) });
+      signature = await signer.signMessage(new TextEncoder().encode(message));
+    }
+    return changesSession(() => verifyLinkable<T>("/solana/verify", { message, signature: base64urlEncode(signature) }, link, callback));
+  }
+
+  async function telegram<T>(login: TelegramLogin, link: boolean, callback: ConfirmationCallback = {}): Promise<T> {
+    return changesSession(() => verifyLinkable<T>("/telegram/verify", { ...login }, link, callback));
   }
 
   const oauthQuery = (redirect?: string) => (redirect ? `?redirect=${encodeURIComponent(redirect)}` : "");
@@ -355,6 +473,14 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     siweNonce: () => post("/wallet/nonce"),
     signInWithEthereum: (signer) => ethereum<SignInResult>(signer, false),
     linkEthereum: (signer, opts) => ethereum<{ status: "linked"; address: string }>(signer, true, opts),
+
+    solanaNonce: () => post("/solana/nonce"),
+    signInWithSolana: (signer) => solana<SignInResult>(signer, false),
+    linkSolana: (signer, opts) => solana<{ status: "linked"; identity: string }>(signer, true, opts),
+
+    telegramEnabled: async () => (await call<{ telegram?: boolean }>("GET", "/providers")).telegram === true,
+    signInWithTelegram: (login) => telegram<SignInResult>(login, false),
+    linkTelegram: (login, opts) => telegram<{ status: "linked"; identity: string }>(login, true, opts),
 
     async registerPasskey(opts = {}) {
       const json = await post<RegistrationOptionsJson>("/passkey/register/options", opts.lang ? { lang: opts.lang } : {});
