@@ -33,6 +33,8 @@ export type AuthErrorCode =
   | "email_not_removable"
   | "wallet_owner_passkey"
   | "embedded_wallet_sign_in"
+  | "unsupported_signature"
+  | "wallet_check_unavailable"
   | "has_embedded_wallet"
   | "network_error"
   | "invalid_response"

@@ -9,6 +9,8 @@ export type AuthMethod =
   | "apple"
   | "wallet"
   | "solana"
+  | "sui"
+  | "starknet"
   | "telegram"
   | "passkey"
   | "passkey_pq"
@@ -64,12 +66,13 @@ export interface AccountInfo {
   totpEnabled: boolean;
   oauth: { provider: OAuthProvider; email: string | null }[];
   wallets: WalletInfo[];
-  /** Solana wallets and Telegram accounts: `solana:<base58 public key>` and `telegram:<user id>`. */
+  /** Solana, Sui and Starknet wallets and Telegram accounts: `solana:<base58 public key>`, `sui:<address>`, `starknet:<address>` and `telegram:<user id>`. */
   identities: { identity: string }[];
   passkeys: { id: string; name: string | null; createdAt: string; lastUsedAt: string | null }[];
 }
 
-export type SignInMethodKind = "email" | "password" | "oauth" | "wallet" | "solana" | "telegram" | "passkey";
+/** `unknown` is a method of a kind this SDK does not know (a later service wrote it): show `label`, never rely on it to sign in. */
+export type SignInMethodKind = "email" | "password" | "oauth" | "wallet" | "solana" | "sui" | "starknet" | "telegram" | "unknown" | "passkey";
 
 /** One way into the account, from `listIdentities`. `id` is what `unlinkIdentity` takes. */
 export interface SignInMethod {

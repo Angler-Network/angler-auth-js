@@ -124,6 +124,43 @@ await auth.signInWithSolana({ address: publicKey.toBase58(), signMessage });
 `SOLANA_CHAIN_IDS`). The account is made without an email. `linkSolana` attaches a wallet to the signed-in account and asks
 for the emailed code the way `linkEthereum` does.
 
+### Sign-in with Sui
+
+The SDK builds the message (CAIP-122, "Sui account") and the wallet signs its bytes as a personal message. Pass the wallet's
+`signPersonalMessage` (Wallet Standard `sui:signPersonalMessage`); the signature is what it returns, base64 of
+`flag || signature || public key`:
+
+`await auth.suiEnabled()` says whether the service has it on (`SUI_ENABLED`); off, every call throws `not_found`.
+
+```ts
+await auth.signInWithSui({
+  address: account.address,
+  signPersonalMessage: (message) => wallet.features["sui:signPersonalMessage"].signPersonalMessage({ message, account }),
+});
+```
+
+`domain` and `uri` come from `location` unless you pass them, `chainId` is `sui:mainnet` (it must be in the service's
+`SUI_CHAIN_IDS`). The account is made without an email. `linkSui` attaches a wallet to the signed-in account and asks for the
+emailed code the way `linkEthereum` does. The service checks Ed25519, Secp256k1 and Secp256r1 signatures; a wallet that signs with
+zkLogin ("Sign in with Google"), a multisig or a passkey fails with `unsupported_signature` (`error.details.scheme` names it).
+
+### Sign-in with Starknet
+
+The SDK builds a SNIP-12 typed message (revision 1) and the wallet signs it. Pass the wallet's `wallet_signTypedData`; it
+gives back the signature felts:
+
+```ts
+await auth.signInWithStarknet({
+  address,
+  signTypedData: (typedData) => wallet.request({ type: "wallet_signTypedData", params: typedData }),
+});
+```
+
+An account is a contract: the service has it check the signature on a Starknet node, so the account must be deployed, and
+sign-in is on only where the service has `STARKNET_RPC_URLS` (`await auth.starknetEnabled()`; otherwise every call throws
+`not_found`). `chainId` is `SN_MAIN`. `wallet_check_unavailable` (503) means the node did not answer and the same call may be
+tried again. `linkStarknet` attaches the account to the signed-in account, with the emailed code.
+
 ### Telegram
 
 Needs `TELEGRAM_BOT_TOKEN` on the service (`await auth.telegramEnabled()`); without it every call throws `not_found`.
@@ -179,7 +216,7 @@ await auth.signOut({ everywhere: true }); // every other session first
 ### Sign-in methods
 
 ```ts
-const { methods, confirmation } = await auth.listIdentities(); // email, password, oauth, wallet, solana, telegram, passkey
+const { methods, confirmation } = await auth.listIdentities(); // email, password, oauth, wallet, solana, sui, starknet, telegram, passkey (or unknown: a kind this SDK predates; show its label)
 const google = methods.find((m) => m.kind === "oauth" && m.provider === "google");
 if (google?.removable) {
   const result = await auth.unlinkIdentity(google.id, { getConfirmationCode: () => prompt("Code from your email") });
@@ -194,7 +231,7 @@ Removing needs a sign-in from the last 15 minutes and, for an account with a ver
 removes every account of a provider by the same rules and now takes the same callback.
 
 Also on the client: `forgotPassword`, `resetPassword`, `changePassword`, `linkOAuth`, `unlinkOAuth`,
-`setupTotp`, `enableTotp`, `disableTotp`, `regenerateRecoveryCodes`, `removePasskey`, `revokeOtherSessions`, `solanaNonce`.
+`setupTotp`, `enableTotp`, `disableTotp`, `regenerateRecoveryCodes`, `removePasskey`, `revokeOtherSessions`, `solanaNonce`, `suiNonce`, `starknetNonce`.
 
 ## Server
 
