@@ -103,6 +103,42 @@ throws `confirmation_required`.
 await auth.linkEthereum(signer, { getConfirmationCode: () => prompt("Code from your email") });
 ```
 
+### Sign-in with Solana
+
+The caller supplies the wallet. With a Wallet Standard wallet (Phantom, Solflare, Backpack), which builds and signs
+the message itself:
+
+```ts
+await auth.signInWithSolana({
+  signIn: (input) => wallet.features["solana:signIn"].signIn(input).then(([output]) => output),
+});
+```
+
+With wallet-adapter, the SDK builds the message and the wallet signs its bytes (`signMessage` gives the 64-byte signature):
+
+```ts
+await auth.signInWithSolana({ address: publicKey.toBase58(), signMessage });
+```
+
+`domain` and `uri` come from `location` unless you pass them, `chainId` is `mainnet` (it must be in the service's
+`SOLANA_CHAIN_IDS`). The account is made without an email. `linkSolana` attaches a wallet to the signed-in account and asks
+for the emailed code the way `linkEthereum` does.
+
+### Telegram
+
+Needs `TELEGRAM_BOT_TOKEN` on the service (`await auth.telegramEnabled()`); without it every call throws `not_found`.
+Pass the Login Widget's `onauth` object as it came, or a Mini App's `initData`:
+
+```ts
+await auth.signInWithTelegram({ widget: user }); // window.onTelegramAuth = (user) => ...
+await auth.signInWithTelegram({ initData: window.Telegram.WebApp.initData });
+await auth.linkTelegram({ widget: user }, { getConfirmationCode: () => prompt("Code from your email") });
+```
+
+Telegram signs every field of the widget's object, so none may be edited, dropped or added. A payload works once
+(`auth_replayed`) and only for a limited time after Telegram made it (`expired_auth`: a day for the widget, an hour
+for a Mini App, unless the service says otherwise). The account is made without an email.
+
 ### Passkeys
 
 ```ts
@@ -141,7 +177,7 @@ await auth.signOut({ everywhere: true }); // every other session first
 ```
 
 Also on the client: `forgotPassword`, `resetPassword`, `changePassword`, `linkOAuth`, `unlinkOAuth`,
-`setupTotp`, `enableTotp`, `disableTotp`, `regenerateRecoveryCodes`, `removePasskey`, `revokeOtherSessions`.
+`setupTotp`, `enableTotp`, `disableTotp`, `regenerateRecoveryCodes`, `removePasskey`, `revokeOtherSessions`, `solanaNonce`.
 
 ## Server
 

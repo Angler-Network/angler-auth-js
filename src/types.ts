@@ -8,6 +8,8 @@ export type AuthMethod =
   | "x"
   | "apple"
   | "wallet"
+  | "solana"
+  | "telegram"
   | "passkey"
   | "passkey_pq"
   | "totp"
@@ -62,5 +64,7 @@ export interface AccountInfo {
   totpEnabled: boolean;
   oauth: { provider: OAuthProvider; email: string | null }[];
   wallets: WalletInfo[];
+  /** Solana wallets and Telegram accounts: `solana:<base58 public key>` and `telegram:<user id>`. */
+  identities: { identity: string }[];
   passkeys: { id: string; name: string | null; createdAt: string; lastUsedAt: string | null }[];
 }
