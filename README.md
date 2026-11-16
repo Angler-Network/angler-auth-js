@@ -94,6 +94,15 @@ The message is built here: EIP-4361, `domain` and `uri` from `location` unless y
 the auth host or one of the service's allowed origins). `linkEthereum` attaches a wallet to the signed-in
 account. An embedded wallet's address is refused with `embedded_wallet_sign_in`.
 
+An account with a verified email must confirm `linkEthereum` and `linkOAuth` with a code the service mails to it.
+Pass `getConfirmationCode` (as for `registerPasskey`); the SDK asks for the code, then repeats the call with it. For
+a wallet it sends the same message and signature again, so the wallet signs once. Without the callback the call
+throws `confirmation_required`.
+
+```ts
+await auth.linkEthereum(signer, { getConfirmationCode: () => prompt("Code from your email") });
+```
+
 ### Passkeys
 
 ```ts

@@ -275,6 +275,19 @@ describe("OAuth", () => {
     assert.equal(last()?.path, "/oauth/google/unlink");
   });
 
+  test("linking asks for the emailed code and sends it with the same redirect", async () => {
+    let calls = 0;
+    auth.on("POST /oauth/google/link", () => (++calls === 1 ? { body: { status: "confirmation_required", confirmation: "email" } } : { body: { url: "https://accounts.google.com/o/oauth2/v2/auth?x=1" } }));
+    const result = await client().linkOAuth("google", { redirect: "https://news.angler.test/s", getConfirmationCode: async () => "012345" });
+    assert.equal(result.url.startsWith("https://accounts.google.com"), true);
+    const posts = auth.requests.filter((r) => r.path === "/oauth/google/link");
+    assert.deepEqual(posts.map((r) => r.body), [{ redirect: "https://news.angler.test/s" }, { redirect: "https://news.angler.test/s", code: "012345" }]);
+    auth.requests.length = 0;
+    calls = 0;
+    await assert.rejects(client().linkOAuth("google"), reject("confirmation_required"));
+    assert.equal(auth.count("POST /oauth/google/link"), 1);
+  });
+
   test("reads what the service left on the return URL", () => {
     assert.deepEqual(parseAuthReturn("https://news.angler.test/?auth_error=link_expired"), { authError: "link_expired", mfaRequired: false });
     assert.deepEqual(parseAuthReturn("https://news.angler.test/home?mfa=required"), { authError: null, mfaRequired: true });
@@ -361,6 +374,70 @@ describe("Ethereum", () => {
     assert.match(signed, /\n\nLink this wallet\.\n\nURI: /);
     assert.ok(signed.endsWith("\nIssued At: 2027-01-15T08:00:00.000Z\nExpiration Time: 2027-01-15T08:05:00.000Z"));
     await assert.rejects(client().signInWithEthereum({ address: ADDRESS, chainId: 1, signMessage: async () => "0x" }), reject("missing_option"));
+  });
+
+  describe("linking with an emailed code", () => {
+    const signer = (signed: string[]) => ({
+      address: ADDRESS,
+      chainId: 1,
+      domain: "news.angler.test",
+      uri: "https://news.angler.test",
+      signMessage: async (message: string) => (signed.push(message), "0xabcd"),
+    });
+    const stop = { body: { status: "confirmation_required", confirmation: "email" } };
+
+    test("asks for the code and resends the same message and signature with it, without a second nonce or signature", async () => {
+      auth.on("POST /wallet/nonce", { body: { nonce: "abcdefgh12345678" } });
+      let calls = 0;
+      auth.on("POST /wallet/verify", () => (++calls === 1 ? stop : { body: { status: "linked", address: ADDRESS.toLowerCase() } }));
+      const signed: string[] = [];
+      const result = await client().linkEthereum(signer(signed), { getConfirmationCode: () => "012345" });
+      assert.deepEqual(result, { status: "linked", address: ADDRESS.toLowerCase() });
+      assert.equal(auth.count("POST /wallet/nonce"), 1);
+      assert.equal(signed.length, 1);
+      const [first, second] = auth.requests.filter((r) => r.path === "/wallet/verify");
+      assert.deepEqual(first?.body, { message: signed[0], signature: "0xabcd", link: true });
+      // A string: a number would not match the service's check and would mail another code.
+      assert.deepEqual(second?.body, { message: signed[0], signature: "0xabcd", link: true, code: "012345" });
+    });
+
+    test("without a way to ask for the code it is an error, and nothing is sent twice", async () => {
+      auth.on("POST /wallet/nonce", { body: { nonce: "abcdefgh12345678" } });
+      auth.on("POST /wallet/verify", stop);
+      await assert.rejects(client().linkEthereum(signer([])), reject("confirmation_required"));
+      assert.equal(auth.count("POST /wallet/verify"), 1);
+      auth.requests.length = 0;
+      await assert.rejects(client().linkEthereum(signer([]), { getConfirmationCode: () => "" }), reject("confirmation_required"));
+      assert.equal(auth.count("POST /wallet/verify"), 1);
+    });
+
+    test("a wrong code is the service's error, and an answer that asks again is not looped on", async () => {
+      auth.on("POST /wallet/nonce", { body: { nonce: "abcdefgh12345678" } });
+      auth.on("POST /wallet/verify", (request) => (request.body?.code ? { status: 400, body: { error: "invalid_code" } } : stop));
+      await assert.rejects(client().linkEthereum(signer([]), { getConfirmationCode: () => "000000" }), reject("invalid_code", 400));
+      auth.on("POST /wallet/verify", stop);
+      auth.requests.length = 0;
+      await assert.rejects(client().linkEthereum(signer([]), { getConfirmationCode: () => "000000" }), reject("confirmation_required"));
+      assert.equal(auth.count("POST /wallet/verify"), 2);
+    });
+
+    test("an account without a verified email links in one call and never asks", async () => {
+      auth.on("POST /wallet/nonce", { body: { nonce: "abcdefgh12345678" } });
+      auth.on("POST /wallet/verify", { body: { status: "linked", address: ADDRESS.toLowerCase() } });
+      await client().linkEthereum(signer([]), {
+        getConfirmationCode: () => {
+          throw new Error("asked");
+        },
+      });
+      assert.equal(auth.count("POST /wallet/verify"), 1);
+    });
+
+    test("signing in with a wallet is not a link: a stray confirmation answer is returned, not answered", async () => {
+      auth.on("POST /wallet/nonce", { body: { nonce: "abcdefgh12345678" } });
+      auth.on("POST /wallet/verify", { body: { status: "signed_in", userId: "u" } });
+      assert.equal((await client().signInWithEthereum(signer([]))).status, "signed_in");
+      assert.equal(last()?.body?.link, undefined);
+    });
   });
 
   test("a rejected signature is a typed error", async () => {
