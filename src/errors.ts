@@ -30,6 +30,8 @@ export type AuthErrorCode =
   | "busy"
   | "not_found"
   | "last_sign_in_method"
+  | "email_not_removable"
+  | "wallet_owner_passkey"
   | "embedded_wallet_sign_in"
   | "has_embedded_wallet"
   | "network_error"

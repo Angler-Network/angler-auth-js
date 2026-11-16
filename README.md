@@ -176,6 +176,23 @@ await auth.signOut();                     // this browser
 await auth.signOut({ everywhere: true }); // every other session first
 ```
 
+### Sign-in methods
+
+```ts
+const { methods, confirmation } = await auth.listIdentities(); // email, password, oauth, wallet, solana, telegram, passkey
+const google = methods.find((m) => m.kind === "oauth" && m.provider === "google");
+if (google?.removable) {
+  const result = await auth.unlinkIdentity(google.id, { getConfirmationCode: () => prompt("Code from your email") });
+  if (result.signedOut) location.assign("/sign-in"); // the session that signed in with that kind ended too
+}
+```
+
+Each method says whether it `canSignIn` now (the service's policy and settings applied) and whether it is `removable`.
+Removing needs a sign-in from the last 15 minutes and, for an account with a verified email, the emailed code: pass
+`getConfirmationCode` (the SDK repeats the call with it), or the call throws `confirmation_required`. Other errors:
+`last_sign_in_method`, `email_not_removable`, `wallet_owner_passkey`, `not_found`. `unlinkOAuth(provider, options)`
+removes every account of a provider by the same rules and now takes the same callback.
+
 Also on the client: `forgotPassword`, `resetPassword`, `changePassword`, `linkOAuth`, `unlinkOAuth`,
 `setupTotp`, `enableTotp`, `disableTotp`, `regenerateRecoveryCodes`, `removePasskey`, `revokeOtherSessions`, `solanaNonce`.
 
