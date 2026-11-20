@@ -62,6 +62,13 @@ export interface SignInResult {
   userId: string;
 }
 
+/** `proof` is a five-minute JWT for one change: send it to the app's server, which checks it with `verifyStepUpProof`. */
+export interface StepUpResult {
+  status: "verified";
+  proof: string;
+  proofExpiresAt: number;
+}
+
 export interface MfaResult {
   status: "signed_in";
 }
@@ -329,6 +336,12 @@ export interface AuthClient {
   enableTotp(code: string): Promise<{ status: "enabled"; recoveryCodes: string[] }>;
   disableTotp(proof: { code: string } | { recoveryCode: string }): Promise<{ status: "disabled" }>;
   regenerateRecoveryCodes(code?: string): Promise<{ recoveryCodes: string[] }>;
+  /**
+   * Asks the signed-in person for their second factor again and returns a proof for one change. `action` names it,
+   * such as `payout_wallet.approve:<id>`: 1 to 200 printable ASCII characters, no spaces. The session does not change.
+   */
+  stepUp(proof: { code: string } | { recoveryCode: string }, options: { action: string }): Promise<StepUpResult>;
+  stepUpWithPasskey(options: { action: string }): Promise<StepUpResult>;
 
   // session
   /** `null` when nobody is signed in. */
@@ -685,6 +698,11 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     enableTotp: (code) => post("/mfa/totp/enable", { code }),
     disableTotp: (proof) => post("/mfa/totp/disable", proof),
     regenerateRecoveryCodes: (code) => post("/mfa/recovery-codes", code === undefined ? {} : { code }),
+    stepUp: (proof, opts) => post<StepUpResult>("/mfa/step-up", { ...proof, action: opts.action }),
+    async stepUpWithPasskey(opts) {
+      const credential = await getAssertion("/mfa/passkey/step-up/options");
+      return post<StepUpResult>("/mfa/passkey/step-up/verify", { credential, action: opts.action });
+    },
 
     async getSession() {
       try {

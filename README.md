@@ -192,6 +192,21 @@ policy a classical (non-ML-DSA) passkey signs in only together with TOTP, and `s
 `second_factor_required` for an account without it; sign in another way and use the passkey as the second
 step (`verifyMfaWithPasskey`). A dismissed prompt throws `passkey_cancelled`.
 
+### Step-up
+
+For one change your server makes, ask the signed-in person for their second factor again and get a proof bound to
+that change:
+
+```ts
+const action = `payout_wallet.approve:${id}`;
+const { proof } = await auth.stepUpWithPasskey({ action }); // or auth.stepUp({ code } | { recoveryCode }, { action })
+await fetch("/api/payout-wallets/approve", { method: "POST", body: JSON.stringify({ id, proof }) });
+```
+
+`action` is 1 to 200 printable ASCII characters with no spaces. A proof lasts five minutes. The session does not
+change. An account without an authenticator app or a passkey can't step up (`invalid_code`, `no_passkeys`). Wrong
+codes answer `invalid_code`, and a bad action answers `invalid_action`.
+
 ### Tokens
 
 ```ts
@@ -267,6 +282,25 @@ Only `EdDSA` (Ed25519, through WebCrypto) and `ML-DSA-65` are accepted. The key 
 
 For tests or several services, `createTokenVerifier(options)` gives a verifier with its own cache, and
 `fetch`/`now` can be injected.
+
+### Verify a step-up proof
+
+```ts
+import { verifyStepUpProof } from "@angler/auth/server";
+
+const proof = await verifyStepUpProof(body.proof, {
+  userId: claims.sub,                       // from the request's access token
+  action: `payout_wallet.approve:${id}`,    // the change about to be made
+  origin: "https://pay.angler.network",     // this app
+  sessionId: claims.sid,                    // the proof must come from this session
+}, { issuer: "https://auth.angler.network" });
+// Then store proof.jti with a unique index and refuse one seen before: a proof makes one change.
+```
+
+It checks the signature and `exp` like `verifyToken`, with audience `step-up`. Then it checks the user, the
+session, the action, the app origin and an age of 300 seconds or less (`maxAgeSeconds`). A failed check throws a `TokenError`
+(`invalid_claims`, `expired`, `bad_audience`). `verifyToken` refuses a proof, and `verifyStepUpProof` refuses an
+access token.
 
 ### Token for a request (SSR)
 
