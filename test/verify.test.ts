@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, describe, test } from "node:test";
-import { createTokenVerifier, TokenError, tryVerifyToken, type TokenErrorCode } from "../src/server/index.ts";
+import { createTokenVerifier, TokenError, tryVerifyToken, verifyStepUpProof, type TokenErrorCode } from "../src/server/index.ts";
 import { claims, fakeAuth, ISSUER, mint, mintHs256, mlDsaSupported, newKey, NOW, publicKeyBytes, type FakeAuth, type TestKey } from "./fake-auth.ts";
 
 let auth: FakeAuth;
@@ -201,5 +201,40 @@ describe("JWKS handling", () => {
     assert.ok(await v.verify(mint(ed, claims({ exp: clock / 1000 + 600 }))));
     clock += 700_000;
     await rejects(v.verify(mint(ed, claims({ exp: clock / 1000 + 600 }))), "jwks_unavailable");
+  });
+});
+
+describe("verifyStepUpProof", () => {
+  const APP = "https://pay.angler.test";
+  const expected = { userId: "6f1f3d7e-2f8e-4b0e-9a8e-0d6a2c1f4b11", sessionId: "a".repeat(32), action: "payout_wallet.approve:42", origin: APP };
+  const options = () => ({ issuer: ISSUER, jwksUrl: `${auth.url}/.well-known/jwks.json`, now: () => clock });
+  const proof = (overrides: Record<string, unknown> = {}) =>
+    mint(ed, claims({ aud: "step-up", role: "step_up", action: expected.action, amr: ["totp"], auth_time: NOW / 1000, origin: APP, exp: NOW / 1000 + 300, ...overrides }));
+
+  test("accepts a proof for this user, action and app", async () => {
+    const result = await verifyStepUpProof(proof(), expected, options());
+    assert.equal(result.action, expected.action);
+    assert.deepEqual(result.amr, ["totp"]);
+  });
+
+  test("refuses a proof for another user, action or app, and an access token", async () => {
+    await rejects(verifyStepUpProof(proof({ sub: "someone-else" }), expected, options()), "invalid_claims");
+    await rejects(verifyStepUpProof(proof({ action: "store.close:1" }), expected, options()), "invalid_claims");
+    await rejects(verifyStepUpProof(proof({ origin: "https://news.angler.test" }), expected, options()), "invalid_claims");
+    await rejects(verifyStepUpProof(mint(ed, claims()), expected, options()), "bad_audience");
+    await rejects(verifyStepUpProof(proof({ role: "authenticated" }), expected, options()), "invalid_claims");
+    await rejects(verifyStepUpProof(proof(), { ...expected, sessionId: "b".repeat(32) }, options()), "invalid_claims");
+    await assert.rejects(verifyStepUpProof(proof(), { ...expected, sessionId: "" }, options()), TypeError);
+    await assert.rejects(verifyStepUpProof(proof({ origin: null }), { ...expected, origin: null as unknown as string }, options()), TypeError);
+  });
+
+  test("an access-token check refuses a proof", async () => {
+    await rejects(verifier().verify(proof()), "bad_audience");
+  });
+
+  test("refuses an old or expired proof", async () => {
+    clock = NOW + 400_000;
+    await rejects(verifyStepUpProof(proof({ exp: NOW / 1000 + 600 }), expected, options()), "expired");
+    await rejects(verifyStepUpProof(proof(), expected, options()), "expired");
   });
 });

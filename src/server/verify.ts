@@ -1,5 +1,5 @@
 import { base64urlDecode, decodeJwtPart } from "../base64url.ts";
-import type { AuthClaims } from "../types.ts";
+import type { AuthClaims, AuthMethod } from "../types.ts";
 
 export type TokenErrorCode =
   | "malformed"
@@ -307,4 +307,70 @@ export function verifyToken(jwt: string, options: VerifyOptions): Promise<AuthCl
  */
 export function tryVerifyToken(jwt: string, options: VerifyOptions): Promise<AuthClaims | null> {
   return sharedVerifier(options).tryVerify(jwt);
+}
+
+/** The audience of a step-up proof. An access token has another one, so neither passes as the other. */
+export const STEP_UP_AUDIENCE = "step-up";
+
+/** Claims of a step-up proof (`proof` from `stepUp` or `stepUpWithPasskey` with an `action`). */
+export interface StepUpClaims {
+  iss: string;
+  aud: string;
+  role: "step_up";
+  sub: string;
+  /** First 32 characters of the session id, as in that session's access tokens. */
+  sid: string;
+  action: string;
+  /** The factor the person used for this proof. */
+  amr: AuthMethod[];
+  auth_time: number;
+  /** The app origin that asked for the proof. */
+  origin: string | null;
+  jti: string;
+  iat: number;
+  exp: number;
+}
+
+export interface StepUpExpectation {
+  /** The signed-in user the change is for. */
+  userId: string;
+  /** The change about to be made, exactly as the browser sent it to `stepUp`. */
+  action: string;
+  /** This app's origin. */
+  origin: string;
+  /** The session the request comes from (`sid` of its access token): a proof made in another session is refused. */
+  sessionId: string;
+  /** Oldest accepted proof, in seconds. Default 300 (the service's own limit). */
+  maxAgeSeconds?: number;
+}
+
+/**
+ * Verifies a step-up proof before one sensitive change: the signature, `iss`, `exp`, audience `step-up`, and that
+ * the proof is for this user, session, action and app, made in the last five minutes. Throws a `TokenError`.
+ *
+ * It does not remember proofs: store `jti` (for example with a unique index) and refuse one seen before, so a proof
+ * makes one change only.
+ */
+export async function verifyStepUpProof(
+  proof: string,
+  expected: StepUpExpectation,
+  options: Omit<VerifyOptions, "audience">,
+): Promise<StepUpClaims> {
+  const claims = (await sharedVerifier({ ...options, audience: STEP_UP_AUDIENCE }).verify(proof)) as unknown as StepUpClaims;
+  const tolerance = options.clockToleranceSeconds ?? 5;
+  const maxAge = expected.maxAgeSeconds ?? 300;
+  const seconds = (options.now ?? Date.now)() / 1000;
+  if (!expected.userId || !expected.action || !expected.origin || !expected.sessionId) {
+    throw new TypeError("verifyStepUpProof needs userId, sessionId, action and origin");
+  }
+  if (claims.role !== "step_up") throw new TokenError("invalid_claims", "not a step-up proof");
+  if (claims.sub !== expected.userId) throw new TokenError("invalid_claims", "proof is for another user");
+  if (claims.sid !== expected.sessionId) throw new TokenError("invalid_claims", "proof is from another session");
+  if (claims.action !== expected.action) throw new TokenError("invalid_claims", "proof is for another action");
+  if (claims.origin !== expected.origin) throw new TokenError("invalid_claims", "proof was asked for by another app");
+  if (typeof claims.jti !== "string" || claims.jti === "") throw new TokenError("invalid_claims", "no jti");
+  if (typeof claims.auth_time !== "number" || claims.auth_time < seconds - maxAge - tolerance) {
+    throw new TokenError("expired", "proof is too old");
+  }
+  return claims;
 }

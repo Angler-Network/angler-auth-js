@@ -6,6 +6,7 @@ export type AuthErrorCode =
   | "unauthenticated"
   | "mfa_required"
   | "reauthentication_required"
+  | "invalid_action"
   | "second_factor_required"
   | "email_not_verified"
   | "account_disabled"

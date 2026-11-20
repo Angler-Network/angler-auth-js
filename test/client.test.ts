@@ -307,6 +307,15 @@ describe("second factor", () => {
     await assert.rejects(client().verifyTotp("000000"), reject("invalid_code", 400));
   });
 
+  test("a step-up sends the factor and the action", async () => {
+    auth.on("POST /mfa/step-up", { body: { status: "verified", proof: "p", proofExpiresAt: 1 } });
+    const result = await client().stepUp({ code: "123456" }, { action: "store.close:7" });
+    assert.deepEqual([last()?.path, last()?.body], ["/mfa/step-up", { code: "123456", action: "store.close:7" }]);
+    assert.equal(result.proof, "p");
+    await client().stepUp({ recoveryCode: "ABCD-EFGH-IJKL" }, { action: "a:1" });
+    assert.deepEqual(last()?.body, { recoveryCode: "ABCD-EFGH-IJKL", action: "a:1" });
+  });
+
   test("enrolment and recovery codes", async () => {
     auth.on("POST /mfa/totp/setup", { body: { secret: "S", uri: "otpauth://totp/x" } });
     auth.on("POST /mfa/totp/enable", { body: { status: "enabled", recoveryCodes: ["a"] } });
